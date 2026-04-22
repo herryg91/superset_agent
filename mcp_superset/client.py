@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+import json
 
 
 def _rison_dumps(obj: dict[str, Any]) -> str:
@@ -316,9 +317,9 @@ class SupersetClient:
         if slug:
             payload["slug"] = slug
         if json_metadata is not None:
-            payload["json_metadata"] = json_metadata
+            payload["json_metadata"] = json_metadata if isinstance(json_metadata, str) else json.dumps(json_metadata)
         if position_json is not None:
-            payload["position_json"] = position_json
+            payload["position_json"] = position_json if isinstance(position_json, str) else json.dumps(position_json)
         data = self.post("/api/v1/dashboard/", json=payload)
         if isinstance(data, dict) and "result" in data:
             return data["result"]
@@ -339,9 +340,9 @@ class SupersetClient:
         if slug is not None:
             payload["slug"] = slug
         if json_metadata is not None:
-            payload["json_metadata"] = json_metadata
+            payload["json_metadata"] = json_metadata if isinstance(json_metadata, str) else json.dumps(json_metadata)
         if position_json is not None:
-            payload["position_json"] = position_json
+            payload["position_json"] = position_json if isinstance(position_json, str) else json.dumps(position_json)
         if published is not None:
             payload["published"] = published
         data = self.put(f"/api/v1/dashboard/{pk}", json=payload)
@@ -359,14 +360,25 @@ class SupersetClient:
         pk: int,
         native_filter_configuration: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Update native (dashboard-level) filters. Replaces existing filter config."""
-        data = self.put(
-            f"/api/v1/dashboard/{pk}/filters",
-            json={"native_filter_configuration": native_filter_configuration},
-        )
-        if isinstance(data, dict) and "result" in data:
-            return data["result"]
-        return data if isinstance(data, dict) else {}
+        """
+        Update native (dashboard-level) filters by writing through json_metadata.
+        Works on Superset 4.x (no /filters sub-endpoint) and 6.x (has /filters
+        but with a different schema). Replaces existing native_filter_configuration;
+        preserves other json_metadata keys.
+        """
+        dash = self.get_dashboard(pk)
+        raw_metadata = dash.get("json_metadata")
+        if isinstance(raw_metadata, str) and raw_metadata.strip():
+            try:
+                json_metadata = json.loads(raw_metadata)
+            except json.JSONDecodeError:
+                json_metadata = {}
+        elif isinstance(raw_metadata, dict):
+            json_metadata = raw_metadata
+        else:
+            json_metadata = {}
+        json_metadata["native_filter_configuration"] = native_filter_configuration
+        return self.update_dashboard(pk, json_metadata=json_metadata)
 
     def get_dashboard_charts(self, id_or_slug: int | str) -> list[dict[str, Any]]:
         data = self.get(f"/api/v1/dashboard/{id_or_slug}/charts")
@@ -390,8 +402,15 @@ class SupersetClient:
         chart = self.get_chart(chart_id)
         chart_uuid = chart.get("uuid") or str(chart_id)
         dash = self.get_dashboard(dashboard_pk)
-        position_json = dash.get("position_json") or {}
-        if not isinstance(position_json, dict):
+        raw_position = dash.get("position_json")
+        if isinstance(raw_position, str) and raw_position.strip():
+            try:
+                position_json = json.loads(raw_position)
+            except json.JSONDecodeError:
+                position_json = {}
+        elif isinstance(raw_position, dict):
+            position_json = raw_position
+        else:
             position_json = {}
         chart_key = f"CHART-{chart_uuid}" if not str(chart_uuid).startswith("CHART-") else str(chart_uuid)
         position_json[chart_key] = {
@@ -437,7 +456,7 @@ class SupersetClient:
             "datasource_type": "dataset",
             "viz_type": viz_type,
             "slice_name": slice_name,
-            "params": params,
+            "params": params if isinstance(params, str) else json.dumps(params),
         }
         if description:
             payload["description"] = description
@@ -457,7 +476,7 @@ class SupersetClient:
         if slice_name is not None:
             payload["slice_name"] = slice_name
         if params is not None:
-            payload["params"] = params
+            payload["params"] = params if isinstance(params, str) else json.dumps(params)
         if description is not None:
             payload["description"] = description
         data = self.put(f"/api/v1/chart/{pk}", json=payload)
